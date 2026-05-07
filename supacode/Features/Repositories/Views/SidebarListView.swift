@@ -1,3 +1,4 @@
+import AppKit
 import ComposableArchitecture
 import SwiftUI
 
@@ -123,6 +124,21 @@ struct SidebarListView: View {
         return true
       }
       .focused($isSidebarFocused)
+      .background(
+        SidebarRightArrowMonitor(isSidebarFocused: isSidebarFocused) {
+          guard
+            let worktreeID = SidebarRightArrowFocusPolicy.targetWorktreeID(
+              selectedWorktreeID: store.selectedWorktreeID,
+              sidebarSelectedWorktreeIDs: state.sidebarSelectedWorktreeIDs
+            ),
+            let terminalState = terminalManager.stateIfExists(for: worktreeID)
+          else {
+            return false
+          }
+          terminalState.focusSelectedTab()
+          return true
+        }
+      )
       .onAppear {
         resetSidebarDrag()
       }
@@ -380,6 +396,78 @@ struct SidebarListView: View {
       selectedWorktreeIDs.insert(selectedWorktreeID)
     }
     return selectedWorktreeIDs
+  }
+}
+
+nonisolated enum SidebarRightArrowFocusPolicy {
+  static func targetWorktreeID(
+    selectedWorktreeID: Worktree.ID?,
+    sidebarSelectedWorktreeIDs: Set<Worktree.ID>
+  ) -> Worktree.ID? {
+    guard let selectedWorktreeID,
+      sidebarSelectedWorktreeIDs.count == 1,
+      sidebarSelectedWorktreeIDs.contains(selectedWorktreeID)
+    else {
+      return nil
+    }
+    return selectedWorktreeID
+  }
+}
+
+private struct SidebarRightArrowMonitor: NSViewRepresentable {
+  let isSidebarFocused: Bool
+  let handle: () -> Bool
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator()
+  }
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView(frame: .zero)
+    context.coordinator.update(isSidebarFocused: isSidebarFocused, handle: handle)
+    context.coordinator.install(host: view)
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {
+    context.coordinator.update(isSidebarFocused: isSidebarFocused, handle: handle)
+  }
+
+  static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+    coordinator.uninstall()
+  }
+
+  @MainActor
+  final class Coordinator {
+    private var isSidebarFocused = false
+    private var handle: () -> Bool = { false }
+    private var monitor: Any?
+
+    func update(isSidebarFocused: Bool, handle: @escaping () -> Bool) {
+      self.isSidebarFocused = isSidebarFocused
+      self.handle = handle
+    }
+
+    func install(host: NSView) {
+      guard monitor == nil else { return }
+      monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak host] event in
+        guard event.specialKey == .rightArrow else { return event }
+        let userModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+        guard event.modifierFlags.isDisjoint(with: userModifiers) else { return event }
+        guard let host, event.window === host.window else { return event }
+        let consumed = MainActor.assumeIsolated {
+          (self?.isSidebarFocused ?? false) && (self?.handle() ?? false)
+        }
+        return consumed ? nil : event
+      }
+    }
+
+    func uninstall() {
+      if let monitor {
+        NSEvent.removeMonitor(monitor)
+      }
+      monitor = nil
+    }
   }
 }
 
