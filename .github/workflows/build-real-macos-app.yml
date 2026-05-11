@@ -70,6 +70,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          APP_PATH="${{ steps.app-path.outputs.app_path }}"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")
           git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-agent" -b codex/preview-agent
           git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-review" -b codex/preview-review
 
@@ -91,6 +93,7 @@ jobs:
               encoding="utf-8",
           )
           PY
+          defaults write "$BUNDLE_ID" lastFocusedWorktreeID -string "$GITHUB_WORKSPACE"
 
       - name: Launch real Prowl.app and capture macOS screen
         shell: bash
