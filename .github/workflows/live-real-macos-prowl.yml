@@ -103,6 +103,7 @@ jobs:
             fi
             sleep 1
           done
+          osascript -e 'tell application id "com.onevcat.prowl" to activate' || true
           "$CLI_PATH" list --json > build/artifacts/prowl-cli-list.json
 
       - name: Enable macOS VNC
@@ -130,39 +131,224 @@ jobs:
           echo "VNC did not open on 127.0.0.1:5900" >&2
           exit 1
 
-      - name: Install noVNC and tunnel
+      - name: Start live browser control tunnel
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m venv build/venv
-          source build/venv/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install websockify
-          git clone --depth 1 https://github.com/novnc/noVNC.git build/noVNC
+          brew list cliclick >/dev/null 2>&1 || brew install cliclick
+          cat > build/live-control-server.py <<'PY'
+          import html
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+          import time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from urllib.parse import parse_qs, urlparse
 
-          python -m websockify --web build/noVNC 6080 127.0.0.1:5900 \
-            > build/artifacts/websockify.log 2>&1 &
+          PASSWORD = os.environ.get("VNC_PASSWORD", "ProwlLiv")
+          HOST = "127.0.0.1"
+          PORT = 6173
+
+          INDEX = """<!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Prowl live macOS control</title>
+            <style>
+              html, body { margin: 0; height: 100%; background: #111; color: #f5f5f5; font: 14px system-ui, -apple-system, Segoe UI, sans-serif; }
+              body { display: grid; grid-template-rows: auto 1fr; }
+              header { display: flex; gap: 8px; align-items: center; padding: 10px; background: #1b1b1b; border-bottom: 1px solid #333; }
+              input, button { height: 32px; border: 1px solid #444; background: #242424; color: #fff; border-radius: 6px; padding: 0 10px; }
+              button { cursor: pointer; }
+              #stage { overflow: auto; display: grid; place-items: start center; padding: 10px; }
+              #screen { max-width: 100%; height: auto; background: #000; border: 1px solid #333; cursor: crosshair; }
+              #status { opacity: .78; }
+            </style>
+          </head>
+          <body>
+            <header>
+              <input id="password" type="password" placeholder="Password" value="">
+              <button onclick="savePassword()">Connect</button>
+              <input id="typeText" type="text" placeholder="Type text then Send" style="min-width:220px">
+              <button onclick="sendText()">Send</button>
+              <button onclick="key('return')">Enter</button>
+              <button onclick="key('tab')">Tab</button>
+              <button onclick="key('esc')">Esc</button>
+              <button onclick="activate()">Activate Prowl</button>
+              <span id="status">Waiting</span>
+            </header>
+            <main id="stage">
+              <img id="screen" alt="Live macOS screen">
+            </main>
+            <script>
+              const img = document.getElementById('screen');
+              const statusEl = document.getElementById('status');
+              const passwordEl = document.getElementById('password');
+              passwordEl.value = localStorage.getItem('prowlLivePassword') || '';
+              function pw() { return passwordEl.value; }
+              function savePassword() { localStorage.setItem('prowlLivePassword', pw()); refresh(); }
+              function setStatus(text) { statusEl.textContent = text; }
+              async function post(path, body) {
+                body.password = pw();
+                const r = await fetch(path, { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(body) });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok || !data.ok) throw new Error(data.error || r.statusText);
+                return data;
+              }
+              function refresh() {
+                if (!pw()) { setStatus('Enter password'); return; }
+                img.src = '/screen.jpg?password=' + encodeURIComponent(pw()) + '&t=' + Date.now();
+              }
+              img.onload = () => { setStatus('Live ' + new Date().toLocaleTimeString()); setTimeout(refresh, 900); };
+              img.onerror = () => { setStatus('No screen yet'); setTimeout(refresh, 1500); };
+              img.addEventListener('click', async (event) => {
+                const rect = img.getBoundingClientRect();
+                const x = Math.round((event.clientX - rect.left) * img.naturalWidth / rect.width);
+                const y = Math.round((event.clientY - rect.top) * img.naturalHeight / rect.height);
+                try { await post('/click', {x, y}); setStatus('Clicked ' + x + ',' + y); }
+                catch (e) { setStatus(e.message); }
+              });
+              async function sendText() {
+                const value = document.getElementById('typeText').value;
+                try { await post('/type', {text: value}); setStatus('Sent text'); }
+                catch (e) { setStatus(e.message); }
+              }
+              async function key(name) {
+                try { await post('/key', {name}); setStatus('Key ' + name); }
+                catch (e) { setStatus(e.message); }
+              }
+              async function activate() {
+                try { await post('/activate', {}); setStatus('Prowl active'); }
+                catch (e) { setStatus(e.message); }
+              }
+              refresh();
+            </script>
+          </body>
+          </html>
+          """
+
+          def run_command(args, timeout=15):
+              result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+              if result.returncode != 0:
+                  raise RuntimeError((result.stderr or result.stdout or "command failed").strip())
+              return result
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  print("%s - %s" % (self.address_string(), fmt % args), flush=True)
+
+              def send_bytes(self, status, content_type, data):
+                  self.send_response(status)
+                  self.send_header("content-type", content_type)
+                  self.send_header("cache-control", "no-store")
+                  self.send_header("content-length", str(len(data)))
+                  self.end_headers()
+                  self.wfile.write(data)
+
+              def send_json(self, status, payload):
+                  self.send_bytes(status, "application/json", json.dumps(payload).encode("utf-8"))
+
+              def query_password(self):
+                  qs = parse_qs(urlparse(self.path).query)
+                  return qs.get("password", [""])[0]
+
+              def read_json(self):
+                  length = int(self.headers.get("content-length", "0"))
+                  data = self.rfile.read(length) if length else b"{}"
+                  return json.loads(data.decode("utf-8") or "{}")
+
+              def check_password(self, supplied):
+                  return supplied == PASSWORD
+
+              def do_GET(self):
+                  parsed = urlparse(self.path)
+                  if parsed.path == "/":
+                      self.send_bytes(200, "text/html; charset=utf-8", INDEX.encode("utf-8"))
+                      return
+                  if parsed.path == "/screen.jpg":
+                      if not self.check_password(self.query_password()):
+                          self.send_bytes(403, "text/plain", b"bad password")
+                          return
+                      target = pathlib.Path(tempfile.gettempdir()) / ("prowl-live-%d.jpg" % time.time_ns())
+                      try:
+                          run_command(["screencapture", "-x", "-t", "jpg", str(target)], timeout=20)
+                          data = target.read_bytes()
+                          self.send_bytes(200, "image/jpeg", data)
+                      except Exception as exc:
+                          self.send_bytes(500, "text/plain", str(exc).encode("utf-8"))
+                      finally:
+                          try:
+                              target.unlink()
+                          except OSError:
+                              pass
+                      return
+                  self.send_bytes(404, "text/plain", b"not found")
+
+              def do_POST(self):
+                  try:
+                      payload = self.read_json()
+                      if not self.check_password(str(payload.get("password", ""))):
+                          self.send_json(403, {"ok": False, "error": "bad password"})
+                          return
+                      parsed = urlparse(self.path)
+                      if parsed.path == "/click":
+                          x = max(0, int(payload.get("x", 0)))
+                          y = max(0, int(payload.get("y", 0)))
+                          run_command(["cliclick", "c:%d,%d" % (x, y)])
+                          self.send_json(200, {"ok": True})
+                          return
+                      if parsed.path == "/type":
+                          text = str(payload.get("text", ""))
+                          if text:
+                              run_command(["cliclick", "t:%s" % text], timeout=30)
+                          self.send_json(200, {"ok": True})
+                          return
+                      if parsed.path == "/key":
+                          allowed = {"return", "tab", "esc", "delete", "space", "arrow-up", "arrow-down", "arrow-left", "arrow-right"}
+                          name = str(payload.get("name", ""))
+                          if name not in allowed:
+                              raise RuntimeError("unsupported key")
+                          run_command(["cliclick", "kp:%s" % name])
+                          self.send_json(200, {"ok": True})
+                          return
+                      if parsed.path == "/activate":
+                          subprocess.run(["osascript", "-e", 'tell application id "com.onevcat.prowl" to activate'], timeout=10)
+                          self.send_json(200, {"ok": True})
+                          return
+                      self.send_json(404, {"ok": False, "error": "not found"})
+                  except Exception as exc:
+                      self.send_json(500, {"ok": False, "error": str(exc)})
+
+          if __name__ == "__main__":
+              print("Live control server listening on http://%s:%d" % (HOST, PORT), flush=True)
+              ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+          PY
+
+          python3 build/live-control-server.py > build/artifacts/live-control.log 2>&1 &
 
           brew list cloudflared >/dev/null 2>&1 || brew install cloudflared
-          cloudflared tunnel --url http://127.0.0.1:6080 --no-autoupdate \
+          cloudflared tunnel --url http://127.0.0.1:6173 --no-autoupdate \
             > build/artifacts/cloudflared.log 2>&1 &
 
           for attempt in {1..90}; do
             URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' build/artifacts/cloudflared.log | head -1 || true)"
             if [ -n "$URL" ]; then
-              NOVNC_URL="$URL/vnc.html?autoconnect=true&resize=scale&path=websockify"
               {
-                echo "URL=$NOVNC_URL"
+                echo "URL=$URL"
                 echo "USERNAME=$USER"
                 echo "PASSWORD=$VNC_PASSWORD"
+                echo "MODE=live-screen-control"
                 echo "EXPIRES_MINUTES=${{ inputs.minutes }}"
               } | tee build/artifacts/live-session.txt
               {
-                echo "### Live Prowl macOS session"
+                echo "### Live Prowl macOS browser-control session"
                 echo
-                echo "- URL: $NOVNC_URL"
+                echo "- URL: $URL"
                 echo "- macOS user: $USER"
-                echo "- VNC password: $VNC_PASSWORD"
+                echo "- Password: $VNC_PASSWORD"
                 echo "- Expires after: ${{ inputs.minutes }} minutes"
               } >> "$GITHUB_STEP_SUMMARY"
               exit 0
@@ -181,7 +367,7 @@ jobs:
             build/artifacts/live-session.txt
             build/artifacts/prowl-cli-open.json
             build/artifacts/prowl-cli-list.json
-            build/artifacts/websockify.log
+            build/artifacts/live-control.log
             build/artifacts/cloudflared.log
           if-no-files-found: error
           retention-days: 1
