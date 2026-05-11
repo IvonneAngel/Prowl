@@ -113,6 +113,24 @@ jobs:
           PY
           }
 
+          shot_raw() {
+            local slug="$1"
+            local title="$2"
+            shot_index=$((shot_index + 1))
+            local file
+            file="$(printf "%02d-%s.png" "$shot_index" "$slug")"
+            sleep 1
+            screencapture -x -t png "$SCREEN_DIR/$file"
+            python3 - "$META_DIR/manifest.jsonl" "$file" "$title" <<'PY'
+          import json
+          import pathlib
+          import sys
+          manifest = pathlib.Path(sys.argv[1])
+          with manifest.open("a", encoding="utf-8") as f:
+              f.write(json.dumps({"file": sys.argv[2], "title": sys.argv[3]}, ensure_ascii=True) + "\n")
+          PY
+          }
+
           key() {
             local script="$1"
             osascript -e 'tell application "System Events" to tell process "Prowl" to set frontmost to true' >/dev/null 2>&1 || true
@@ -170,6 +188,25 @@ jobs:
             sleep 1
           }
 
+          open_menu_and_shot() {
+            local menu_title="$1"
+            local slug="$2"
+            osascript - "$menu_title" <<'OSA' >/dev/null 2>&1 || true
+          on run argv
+            set menuTitle to item 1 of argv
+            tell application id "com.onevcat.prowl" to activate
+            delay 0.3
+            tell application "System Events"
+              tell process "Prowl"
+                click menu bar item menuTitle of menu bar 1
+              end tell
+            end tell
+          end run
+          OSA
+            shot_raw "$slug" "Menu: $menu_title"
+            key 'key code 53' 1
+          }
+
           dump_ax() {
             local name="$1"
             osascript <<'OSA' > "$META_DIR/$name.txt" 2>&1 || true
@@ -216,13 +253,41 @@ jobs:
           shot "main-worktree-terminal" "Main repository and live terminal"
           dump_ax "ax-main-worktree-terminal"
 
-          # 3. User-facing main modes and overlays.
+          # 3. App menus, context menus, and user-facing overlays.
+          open_menu_and_shot "File" "menu-file"
+          open_menu_and_shot "Edit" "menu-edit"
+          open_menu_and_shot "View" "menu-view"
+          open_menu_and_shot "Worktrees" "menu-worktrees"
+          open_menu_and_shot "Debug" "menu-debug"
+          open_menu_and_shot "Window" "menu-window"
+          open_menu_and_shot "Help" "menu-help"
+
+          cliclick rc:170,258 >/dev/null 2>&1 || true
+          shot_raw "context-worktree-row" "Context menu: worktree row"
+          key 'key code 53' 1
+
+          cliclick rc:413,128 >/dev/null 2>&1 || true
+          shot_raw "context-terminal-tab" "Context menu: terminal tab"
+          key 'key code 53' 1
+
           key 'keystroke "p" using command down' 1
           shot "command-palette" "Command palette overlay"
+          key 'keystroke "settings"' 1
+          shot "command-palette-settings-search" "Command palette search: settings"
+          key 'key code 53' 1
+          key 'keystroke "p" using command down' 1
+          key 'keystroke "worktree"' 1
+          shot "command-palette-worktree-search" "Command palette search: worktree"
+          key 'key code 53' 1
+          key 'keystroke "p" using command down' 1
+          key 'keystroke "diff"' 1
+          shot "command-palette-diff-search" "Command palette search: diff"
           key 'key code 53' 1
 
           key 'key code 36 using {command down, option down}' 2
           shot "canvas-view" "Canvas view with worktree cards"
+          cliclick c:384,679 >/dev/null 2>&1 || true
+          shot "canvas-navigation-help" "Canvas navigation help"
 
           key 'key code 36 using {command down, shift down}' 2
           shot "shelf-view" "Shelf view"
@@ -232,6 +297,8 @@ jobs:
 
           key 'keystroke "n" using command down' 1
           shot "new-worktree-prompt" "New worktree prompt"
+          cliclick c:432,475 >/dev/null 2>&1 || true
+          shot_raw "new-worktree-base-picker" "New worktree base ref picker"
           key 'key code 53' 1
 
           key 'keystroke "y" using {command down, shift down}' 2
@@ -249,6 +316,8 @@ jobs:
           shot "settings-shortcuts" "Settings: Shortcuts"
           select_settings_item "Worktree" 210 250
           shot "settings-worktree" "Settings: Worktree"
+          key 'key code 121' 1
+          shot "settings-worktree-scrolled" "Settings: Worktree scrolled"
           select_settings_item "Updates" 210 280
           shot "settings-updates" "Settings: Updates"
           select_settings_item "Advanced" 210 310
@@ -257,6 +326,12 @@ jobs:
           shot "settings-github" "Settings: GitHub"
           select_settings_item "Prowl" 170 390
           shot "settings-repository" "Settings: Repository-specific"
+          key 'key code 121' 1
+          shot "settings-repository-scrolled-1" "Settings: Repository-specific scrolled"
+          key 'key code 121' 1
+          shot "settings-repository-scrolled-2" "Settings: Repository-specific custom commands area"
+          cliclick c:858,443 >/dev/null 2>&1 || true
+          shot_raw "settings-repository-branch-picker" "Settings repository branch picker"
           dump_ax "ax-settings"
 
           # 5. Debug-only but useful for copying internal icon language.
