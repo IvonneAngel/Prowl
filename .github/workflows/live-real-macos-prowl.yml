@@ -1,0 +1,194 @@
+name: live real macOS Prowl
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes to keep the macOS session alive
+        required: true
+        default: "60"
+
+concurrency:
+  group: live-real-macos-prowl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: Open live Prowl.app on macOS
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      MISE_HTTP_TIMEOUT: 120
+      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SPM_CACHE_DIR: ${{ github.workspace }}/build/spm-cache
+      VNC_PASSWORD: ProwlLive2026!
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup macOS toolchain
+        uses: ./.github/actions/setup-macos
+
+      - name: Build the real macOS app
+        run: make build-app
+
+      - name: Resolve built app path
+        id: app-path
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild -project supacode.xcodeproj \
+            -scheme supacode \
+            -configuration Debug \
+            -showBuildSettings \
+            -json \
+            -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" > build/build-settings.json
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import pathlib
+
+          settings = json.loads(pathlib.Path("build/build-settings.json").read_text())[0]["buildSettings"]
+          app_path = pathlib.Path(settings["BUILT_PRODUCTS_DIR"]) / settings["FULL_PRODUCT_NAME"]
+          if not app_path.exists():
+              raise SystemExit(f"Built app not found: {app_path}")
+          print(f"app_path={app_path}")
+          PY
+
+      - name: Seed repository state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-agent" -b codex/preview-agent
+          git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-review" -b codex/preview-review
+          mkdir -p "$HOME/.prowl"
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          root = os.environ["GITHUB_WORKSPACE"]
+          prowl_dir = pathlib.Path.home() / ".prowl"
+          prowl_dir.mkdir(parents=True, exist_ok=True)
+          (prowl_dir / "repository-entries.json").write_text(
+              json.dumps([{"path": root, "kind": "git"}], indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          (prowl_dir / "settings.json").write_text(
+              json.dumps({"repositoryRoots": [root]}, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Launch Prowl and open repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/artifacts
+          APP_PATH="${{ steps.app-path.outputs.app_path }}"
+          CLI_PATH="$APP_PATH/Contents/Resources/prowl-cli/prowl"
+          open "$APP_PATH"
+          for attempt in {1..30}; do
+            if "$CLI_PATH" open --json "$GITHUB_WORKSPACE" > build/artifacts/prowl-cli-open.json 2> build/artifacts/prowl-cli-open.stderr; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat build/artifacts/prowl-cli-open.stderr >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          "$CLI_PATH" list --json > build/artifacts/prowl-cli-list.json
+
+      - name: Enable macOS VNC
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -users "$USER" \
+            -privs -all \
+            -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent
+
+          for attempt in {1..30}; do
+            if nc -z 127.0.0.1 5900; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "VNC did not open on 127.0.0.1:5900" >&2
+          exit 1
+
+      - name: Install noVNC and tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git build/noVNC
+
+          python3 -m websockify --web build/noVNC 6080 127.0.0.1:5900 \
+            > build/artifacts/websockify.log 2>&1 &
+
+          brew list cloudflared >/dev/null 2>&1 || brew install cloudflared
+          cloudflared tunnel --url http://127.0.0.1:6080 --no-autoupdate \
+            > build/artifacts/cloudflared.log 2>&1 &
+
+          for attempt in {1..90}; do
+            URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' build/artifacts/cloudflared.log | head -1 || true)"
+            if [ -n "$URL" ]; then
+              NOVNC_URL="$URL/vnc.html?autoconnect=true&resize=scale&path=websockify"
+              {
+                echo "URL=$NOVNC_URL"
+                echo "PASSWORD=$VNC_PASSWORD"
+                echo "EXPIRES_MINUTES=${{ inputs.minutes }}"
+              } | tee build/artifacts/live-session.txt
+              {
+                echo "### Live Prowl macOS session"
+                echo
+                echo "- URL: $NOVNC_URL"
+                echo "- VNC password: $VNC_PASSWORD"
+                echo "- Expires after: ${{ inputs.minutes }} minutes"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat build/artifacts/cloudflared.log >&2 || true
+          exit 1
+
+      - name: Upload live session details
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prowl-live-macos-session-${{ github.run_id }}
+          path: |
+            build/artifacts/live-session.txt
+            build/artifacts/prowl-cli-open.json
+            build/artifacts/prowl-cli-list.json
+            build/artifacts/websockify.log
+            build/artifacts/cloudflared.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep session alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          minutes="${{ inputs.minutes }}"
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]]; then
+            minutes=60
+          fi
+          if [ "$minutes" -lt 5 ]; then minutes=5; fi
+          if [ "$minutes" -gt 300 ]; then minutes=300; fi
+          echo "Keeping live macOS session open for $minutes minutes."
+          sleep "$((minutes * 60))"
