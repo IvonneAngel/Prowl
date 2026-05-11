@@ -100,8 +100,20 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH="${{ steps.app-path.outputs.app_path }}"
+          CLI_PATH="$APP_PATH/Contents/Resources/prowl-cli/prowl"
           open "$APP_PATH"
-          sleep 20
+          for attempt in {1..30}; do
+            if "$CLI_PATH" open --json "$GITHUB_WORKSPACE" > build/artifacts/prowl-cli-open.json 2> build/artifacts/prowl-cli-open.stderr; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat build/artifacts/prowl-cli-open.stderr >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          "$CLI_PATH" list --json > build/artifacts/prowl-cli-list.json 2> build/artifacts/prowl-cli-list.stderr || true
+          sleep 8
           osascript -e 'tell application "Prowl" to activate' || true
           sleep 2
           screencapture -x build/artifacts/Prowl.real-macos-screen.png
@@ -114,6 +126,10 @@ jobs:
           path: |
             build/artifacts/Prowl.real-macos.app.zip
             build/artifacts/codesign.txt
+            build/artifacts/prowl-cli-open.json
+            build/artifacts/prowl-cli-open.stderr
+            build/artifacts/prowl-cli-list.json
+            build/artifacts/prowl-cli-list.stderr
             build/artifacts/Prowl.real-macos-screen.png
           if-no-files-found: error
           retention-days: 14
