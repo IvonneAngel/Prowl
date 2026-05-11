@@ -1,0 +1,88 @@
+name: build real macOS app
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-real-macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Prowl.app on macOS
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      MISE_HTTP_TIMEOUT: 120
+      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SPM_CACHE_DIR: ${{ github.workspace }}/build/spm-cache
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup macOS toolchain
+        uses: ./.github/actions/setup-macos
+
+      - name: Build the real macOS app
+        run: make build-app
+
+      - name: Resolve built app path
+        id: app-path
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild -project supacode.xcodeproj \
+            -scheme supacode \
+            -configuration Debug \
+            -showBuildSettings \
+            -json \
+            -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" > build/build-settings.json
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import pathlib
+
+          settings = json.loads(pathlib.Path("build/build-settings.json").read_text())[0]["buildSettings"]
+          built_products_dir = settings["BUILT_PRODUCTS_DIR"]
+          full_product_name = settings["FULL_PRODUCT_NAME"]
+          app_path = pathlib.Path(built_products_dir) / full_product_name
+          if not app_path.exists():
+              raise SystemExit(f"Built app not found: {app_path}")
+          print(f"app_path={app_path}")
+          PY
+
+      - name: Package Prowl.app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/artifacts
+          ditto -c -k --sequesterRsrc --keepParent \
+            "${{ steps.app-path.outputs.app_path }}" \
+            build/artifacts/Prowl.real-macos.app.zip
+          codesign -dv "${{ steps.app-path.outputs.app_path }}" 2>&1 | tee build/artifacts/codesign.txt || true
+
+      - name: Launch real Prowl.app and capture macOS screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="${{ steps.app-path.outputs.app_path }}"
+          open "$APP_PATH"
+          sleep 12
+          screencapture -x build/artifacts/Prowl.real-macos-screen.png
+          osascript -e 'tell application "Prowl" to quit' || true
+
+      - name: Upload real macOS app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prowl-real-macos-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/artifacts/Prowl.real-macos.app.zip
+            build/artifacts/codesign.txt
+            build/artifacts/Prowl.real-macos-screen.png
+          if-no-files-found: error
+          retention-days: 14
