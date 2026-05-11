@@ -151,6 +151,25 @@ jobs:
             sleep 1
           }
 
+          select_settings_item() {
+            local label="$1"
+            local fallback_x="$2"
+            local fallback_y="$3"
+            LABEL="$label" osascript <<'OSA' >/dev/null 2>&1 || true
+          tell application "System Events"
+            tell process "Prowl"
+              set targetName to (system attribute "LABEL")
+              try
+                set matches to every UI element of entire contents of window "Settings" whose name is targetName
+                if (count of matches) > 0 then click item 1 of matches
+              end try
+            end tell
+          end tell
+          OSA
+            cliclick "c:${fallback_x},${fallback_y}" >/dev/null 2>&1 || true
+            sleep 1
+          }
+
           dump_ax() {
             local name="$1"
             osascript <<'OSA' > "$META_DIR/$name.txt" 2>&1 || true
@@ -222,21 +241,21 @@ jobs:
           key 'keystroke "," using command down' 2
           place_settings_window
           shot "settings-general" "Settings: General"
-          cliclick c:210,160 || true
+          select_settings_item "General" 210 160
           shot "settings-general-clicked" "Settings: General selected"
-          cliclick c:210,190 || true
+          select_settings_item "Notifications" 210 190
           shot "settings-notifications" "Settings: Notifications"
-          cliclick c:210,220 || true
+          select_settings_item "Shortcuts" 210 220
           shot "settings-shortcuts" "Settings: Shortcuts"
-          cliclick c:210,250 || true
+          select_settings_item "Worktree" 210 250
           shot "settings-worktree" "Settings: Worktree"
-          cliclick c:210,280 || true
+          select_settings_item "Updates" 210 280
           shot "settings-updates" "Settings: Updates"
-          cliclick c:210,310 || true
+          select_settings_item "Advanced" 210 310
           shot "settings-advanced" "Settings: Advanced"
-          cliclick c:210,340 || true
+          select_settings_item "GitHub" 210 340
           shot "settings-github" "Settings: GitHub"
-          cliclick c:210,405 || true
+          select_settings_item "Prowl" 170 390
           shot "settings-repository" "Settings: Repository-specific"
           dump_ax "ax-settings"
 
