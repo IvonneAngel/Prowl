@@ -66,13 +66,41 @@ jobs:
             build/artifacts/Prowl.real-macos.app.zip
           codesign -dv "${{ steps.app-path.outputs.app_path }}" 2>&1 | tee build/artifacts/codesign.txt || true
 
+      - name: Seed real repository state for preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-agent" -b codex/preview-agent
+          git -C "$GITHUB_WORKSPACE" worktree add "$RUNNER_TEMP/prowl-preview-review" -b codex/preview-review
+
+          mkdir -p "$HOME/.prowl"
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          root = os.environ["GITHUB_WORKSPACE"]
+          prowl_dir = pathlib.Path.home() / ".prowl"
+          prowl_dir.mkdir(parents=True, exist_ok=True)
+          (prowl_dir / "repository-entries.json").write_text(
+              json.dumps([{"path": root, "kind": "git"}], indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          (prowl_dir / "settings.json").write_text(
+              json.dumps({"repositoryRoots": [root]}, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Launch real Prowl.app and capture macOS screen
         shell: bash
         run: |
           set -euo pipefail
           APP_PATH="${{ steps.app-path.outputs.app_path }}"
           open "$APP_PATH"
-          sleep 12
+          sleep 20
+          osascript -e 'tell application "Prowl" to activate' || true
+          sleep 2
           screencapture -x build/artifacts/Prowl.real-macos-screen.png
           osascript -e 'tell application "Prowl" to quit' || true
 

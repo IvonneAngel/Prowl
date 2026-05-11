@@ -4,6 +4,8 @@ This project cannot turn the macOS `.app` into a Windows `.exe` without rewritin
 
 The workflow at `.github/workflows/build-real-macos-app.yml` uses a GitHub-hosted `macos-26` runner as the macOS sandbox. It checks out the repo, initializes submodules, runs the same `make build-app` path used by the project, packages the actual built `Prowl.app`, and uploads it as an artifact.
 
+The workflow also seeds Prowl's own repository persistence (`~/.prowl/repository-entries.json`) before launching the app in the macOS runner. That produces a screenshot of the real app opened against the checked-out repository instead of the empty first-run screen.
+
 ## How to run it
 
 1. Push this repo to a GitHub fork or branch where Actions are enabled.
@@ -12,4 +14,4 @@ The workflow at `.github/workflows/build-real-macos-app.yml` uses a GitHub-hoste
 4. Click **Run workflow**.
 5. Download the artifact named `Prowl-real-macos-app-*`.
 
-The artifact is a real macOS app bundle. It runs on macOS, not Windows. To interact with it from Windows, run it on a Mac or Mac cloud host and connect by remote desktop.
+The artifact contains the real macOS app bundle ZIP, codesign metadata, and a live macOS screenshot from the runner. The app bundle runs on macOS, not Windows. To interact with it from Windows, run it on a Mac or Mac cloud host and connect by remote desktop.
