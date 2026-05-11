@@ -23,7 +23,7 @@ jobs:
       MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       SPM_CACHE_DIR: ${{ github.workspace }}/build/spm-cache
-      VNC_PASSWORD: ProwlLive2026!
+      VNC_PASSWORD: ProwlLiv
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -109,6 +109,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo dscl . -passwd "/Users/$USER" "$VNC_PASSWORD" || true
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -152,6 +153,7 @@ jobs:
               NOVNC_URL="$URL/vnc.html?autoconnect=true&resize=scale&path=websockify"
               {
                 echo "URL=$NOVNC_URL"
+                echo "USERNAME=$USER"
                 echo "PASSWORD=$VNC_PASSWORD"
                 echo "EXPIRES_MINUTES=${{ inputs.minutes }}"
               } | tee build/artifacts/live-session.txt
@@ -159,6 +161,7 @@ jobs:
                 echo "### Live Prowl macOS session"
                 echo
                 echo "- URL: $NOVNC_URL"
+                echo "- macOS user: $USER"
                 echo "- VNC password: $VNC_PASSWORD"
                 echo "- Expires after: ${{ inputs.minutes }} minutes"
               } >> "$GITHUB_STEP_SUMMARY"
